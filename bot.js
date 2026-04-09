@@ -1,13 +1,14 @@
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
+const http = require('http');
 
-// ==================== CONFIGURATION (HARDCODED) ====================
+// ==================== CONFIGURATION ====================
 const CONFIG = {
-    BOT_TOKEN: '8373867092:AAElpg_Ht00ndtBsfodW69JW_Ce2VHtQco0',
-    ADMIN_ID: 8597801059,                     // Your Telegram user ID
+    BOT_TOKEN: '8373867092:AAGdhIUllnFiW6D18WFm5cIoT-B91HFdAes',
+    ADMIN_ID: 8597801059,
     BOT_USERNAME: 'refertoearn_inr_bot',
-    CHANNELS: ['@brutetest'],                 // Channels to join
-    CHANNELS_ON_CHECK: ['@brutetest'],        // Channels to verify
+    CHANNELS: ['@brutetest'],
+    CHANNELS_ON_CHECK: ['@brutetest'],
     WELCOME_BONUS: 1,
     PER_REFERRAL_BONUS: 2,
     MIN_WITHDRAW_LIMIT: 20
@@ -130,6 +131,16 @@ async function rejectWithdrawal(userId, bot) {
 const bot = new TelegramBot(CONFIG.BOT_TOKEN, { polling: true });
 loadDatabase();
 console.log('Bot started successfully!');
+
+// Simple HTTP server to satisfy Render's port requirement
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running');
+});
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+    console.log(`HTTP server listening on port ${PORT}`);
+});
 
 // ==================== COMMAND: /start ====================
 bot.onText(/\/start(?:\s+ref_(.+))?/, async (msg, match) => {
