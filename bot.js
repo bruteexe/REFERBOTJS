@@ -1,5 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const fs = require('fs');
+const { MongoClient } = require('mongodb');
 const http = require('http');
 
 // ==================== CONFIGURATION ====================
@@ -8,53 +8,59 @@ const CONFIG = {
     ADMIN_ID: 8597801059,
     BOT_USERNAME: 'refertoearn_inr_bot',
     CHANNELS: ['@brutetest'],
-    CHANNELS_ON_CHECK: ['@brutetest'],
-    WELCOME_BONUS: 60000,
+    CHANNELS_ON_CHECK: ['@brutetest'], // set [] to skip channel check
+    WELCOME_BONUS: 1,
     PER_REFERRAL_BONUS: 2,
     MIN_WITHDRAW_LIMIT: 20
 };
 
-// ==================== DATA STORAGE ====================
-const DATA_FILE = 'data.json';
-let db = {};
-
-function loadDatabase() {
-    try {
-        if (fs.existsSync(DATA_FILE)) {
-            db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-        } else {
-            db = {};
-            saveDatabase();
-        }
-    } catch (err) {
-        db = {};
-    }
+// ==================== MONGODB CONNECTION ====================
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+    console.error('ERROR: MONGODB_URI environment variable not set');
+    process.exit(1);
 }
 
-function saveDatabase() {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
+let db;
+let usersCollection;
+
+async function connectToDatabase() {
+    const client = new MongoClient(MONGODB_URI);
+    await client.connect();
+    db = client.db('referral_bot');
+    usersCollection = db.collection('users');
+    await usersCollection.createIndex({ pending_referrer: 1 });
+    console.log('Connected to MongoDB Atlas');
 }
 
-function getUserData(userId) {
+// ==================== DATABASE FUNCTIONS ====================
+async function getUserData(userId) {
     const key = userId.toString();
-    if (!db[key]) {
-        db[key] = {
+    let user = await usersCollection.findOne({ _id: key });
+    if (!user) {
+        const newUser = {
+            _id: key,
             balance: CONFIG.WELCOME_BONUS,
             wait_for_ans: 'no',
             withdraw_step: 'none',
             pending_withdraw_amount: 0,
             pending_withdraw_upi: '',
             pending_referrer: 0,
-            referral_credited: false
+            referral_credited: false,
+            createdAt: new Date()
         };
-        saveDatabase();
+        await usersCollection.insertOne(newUser);
+        return newUser;
     }
-    return db[key];
+    return user;
 }
 
-function updateUserData(userId, data) {
-    db[userId.toString()] = data;
-    saveDatabase();
+async function updateUserData(userId, updateFields) {
+    const key = userId.toString();
+    await usersCollection.updateOne(
+        { _id: key },
+        { $set: updateFields }
+    );
 }
 
 // ==================== BOLD SERIF FONT ====================
@@ -72,13 +78,12 @@ function boldSerif(text) {
 
 // ==================== HELPER FUNCTIONS ====================
 async function checkUserJoinedChannels(userId, bot) {
+    if (CONFIG.CHANNELS_ON_CHECK.length === 0) return true;
     for (const channel of CONFIG.CHANNELS_ON_CHECK) {
         try {
             const member = await bot.getChatMember(channel, userId);
             const status = member.status;
-            if (!['member', 'administrator', 'creator'].includes(status)) {
-                return false;
-            }
+            if (!['member', 'administrator', 'creator'].includes(status)) return false;
         } catch (err) {
             return false;
         }
@@ -99,237 +104,251 @@ async function sendNormalKeyboard(chatId, bot) {
 
 // ==================== ADMIN COMMANDS ====================
 async function approveWithdrawal(userId, bot) {
-    const userData = getUserData(userId);
-    const pending = userData.pending_withdraw_amount;
-    if (pending <= 0) {
-        await bot.sendMessage(CONFIG.ADMIN_ID, 'No pending withdrawal for this user.');
-        return;
+    try {
+        const userData = await getUserData(userId);
+        const pending = userData.pending_withdraw_amount;
+        if (pending <= 0) {
+            await bot.sendMessage(CONFIG.ADMIN_ID, 'No pending withdrawal for this user.');
+            return;
+        }
+        await updateUserData(userId, { pending_withdraw_amount: 0, pending_withdraw_upi: '' });
+        await bot.sendMessage(userId, boldSerif(`✅ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐨𝐟 ₹${pending} 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐚𝐩𝐩𝐫𝐨𝐯𝐞𝐝 𝐚𝐧𝐝 𝐬𝐞𝐧𝐭 𝐭𝐨 𝐲𝐨𝐮𝐫 𝐔𝐏𝐈.`));
+        await bot.sendMessage(CONFIG.ADMIN_ID, `Withdrawal approved for user ${userId} (₹${pending}).`);
+        console.log(`Approved withdrawal for ${userId}: ₹${pending}`);
+    } catch (err) {
+        console.error('approveWithdrawal error:', err);
+        await bot.sendMessage(CONFIG.ADMIN_ID, `Error: ${err.message}`);
     }
-    userData.pending_withdraw_amount = 0;
-    userData.pending_withdraw_upi = '';
-    updateUserData(userId, userData);
-    await bot.sendMessage(userId, boldSerif(`✅ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐨𝐟 ₹${pending} 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐚𝐩𝐩𝐫𝐨𝐯𝐞𝐝 𝐚𝐧𝐝 𝐬𝐞𝐧𝐭 𝐭𝐨 𝐲𝐨𝐮𝐫 𝐔𝐏𝐈.`));
-    await bot.sendMessage(CONFIG.ADMIN_ID, `Withdrawal approved for user ${userId} (₹${pending}).`);
 }
 
 async function rejectWithdrawal(userId, bot) {
-    const userData = getUserData(userId);
-    const pending = userData.pending_withdraw_amount;
-    if (pending <= 0) {
-        await bot.sendMessage(CONFIG.ADMIN_ID, 'No pending withdrawal for this user.');
-        return;
+    try {
+        const userData = await getUserData(userId);
+        const pending = userData.pending_withdraw_amount;
+        if (pending <= 0) {
+            await bot.sendMessage(CONFIG.ADMIN_ID, 'No pending withdrawal for this user.');
+            return;
+        }
+        const newBalance = (userData.balance || 0) + pending;
+        await updateUserData(userId, {
+            balance: newBalance,
+            pending_withdraw_amount: 0,
+            pending_withdraw_upi: ''
+        });
+        await bot.sendMessage(userId, boldSerif(`❌ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐫𝐞𝐪𝐮𝐞𝐬𝐭 𝐨𝐟 ₹${pending} 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐫𝐞𝐣𝐞𝐜𝐭𝐞𝐝. 𝐀𝐦𝐨𝐮𝐧𝐭 𝐫𝐞𝐟𝐮𝐧𝐝𝐞𝐝.`));
+        await bot.sendMessage(CONFIG.ADMIN_ID, `Withdrawal rejected for user ${userId} (₹${pending} refunded).`);
+        console.log(`Rejected withdrawal for ${userId}: ₹${pending}`);
+    } catch (err) {
+        console.error('rejectWithdrawal error:', err);
+        await bot.sendMessage(CONFIG.ADMIN_ID, `Error: ${err.message}`);
     }
-    userData.balance += pending;
-    userData.pending_withdraw_amount = 0;
-    userData.pending_withdraw_upi = '';
-    updateUserData(userId, userData);
-    await bot.sendMessage(userId, boldSerif(`❌ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐫𝐞𝐪𝐮𝐞𝐬𝐭 𝐨𝐟 ₹${pending} 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐫𝐞𝐣𝐞𝐜𝐭𝐞𝐝. 𝐀𝐦𝐨𝐮𝐧𝐭 𝐫𝐞𝐟𝐮𝐧𝐝𝐞𝐝.`));
-    await bot.sendMessage(CONFIG.ADMIN_ID, `Withdrawal rejected for user ${userId} (₹${pending} refunded).`);
 }
 
 // ==================== BOT INITIALIZATION ====================
-const bot = new TelegramBot(CONFIG.BOT_TOKEN, { polling: true });
-loadDatabase();
-console.log('Bot started successfully!');
+let bot;
+async function startBot() {
+    await connectToDatabase();
+    bot = new TelegramBot(CONFIG.BOT_TOKEN, { polling: true });
+    console.log('Bot started successfully!');
 
-// Simple HTTP server to satisfy Render's port requirement
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot is running');
-});
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-    console.log(`HTTP server listening on port ${PORT}`);
-});
+    // HTTP server for Render
+    const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Bot is running');
+    });
+    const PORT = process.env.PORT || 8080;
+    server.listen(PORT, () => console.log(`HTTP server on port ${PORT}`));
 
-// ==================== COMMAND: /start ====================
-bot.onText(/\/start(?:\s+ref_(.+))?/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const firstName = msg.from.first_name;
-    const referrerIdStr = match[1] ? match[1] : null;
+    // ---------------------- /start command ----------------------
+    bot.onText(/\/start(?:\s+ref_(.+))?/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const firstName = msg.from.first_name;
+        const referrerIdStr = match[1] ? match[1] : null;
+        console.log(`/start from ${chatId}, referrer: ${referrerIdStr}`);
 
-    let userData = getUserData(chatId);
-    const isNew = !db[chatId.toString()];
+        let userData = await getUserData(chatId);
+        const isNew = userData.createdAt && (new Date() - new Date(userData.createdAt) < 5000);
 
-    if (isNew) {
-        userData = getUserData(chatId);
-        await bot.sendMessage(chatId, boldSerif(`🎉 𝐂𝐨𝐧𝐠𝐫𝐚𝐭𝐬, 𝐘𝐨𝐮 𝐫𝐞𝐜𝐞𝐢𝐯𝐞𝐝 ₹${CONFIG.WELCOME_BONUS} 𝐰𝐞𝐥𝐜𝐨𝐦𝐞 𝐛𝐨𝐧𝐮𝐬.`));
+        if (isNew) {
+            console.log(`New user: ${chatId}`);
+            await bot.sendMessage(chatId, boldSerif(`🎉 𝐂𝐨𝐧𝐠𝐫𝐚𝐭𝐬, 𝐘𝐨𝐮 𝐫𝐞𝐜𝐞𝐢𝐯𝐞𝐝 ₹${CONFIG.WELCOME_BONUS} 𝐰𝐞𝐥𝐜𝐨𝐦𝐞 𝐛𝐨𝐧𝐮𝐬.`));
 
-        if (referrerIdStr && referrerIdStr !== chatId.toString()) {
-            const referrerId = parseInt(referrerIdStr);
-            if (db[referrerId]) {
-                userData.pending_referrer = referrerId;
-                updateUserData(chatId, userData);
-            }
-        }
-    } else {
-        await bot.sendMessage(chatId, boldSerif('👋 𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐛𝐚𝐜𝐤!'));
-    }
-
-    // Build inline keyboard for channels
-    const inlineKeyboard = [];
-    for (const ch of CONFIG.CHANNELS) {
-        inlineKeyboard.push([{ text: `↗️ Join ${ch}`, url: `https://t.me/${ch.substring(1)}` }]);
-    }
-    inlineKeyboard.push([{ text: '✅ Joined', callback_data: '/joined' }]);
-
-    const welcomeText = boldSerif(
-        '𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐭𝐨 𝐨𝐮𝐫 𝐛𝐨𝐭!\n\n' +
-        '👨‍💻 𝐑𝐞𝐟𝐞𝐫 & 𝐞𝐚𝐫𝐧 𝐫𝐮𝐩𝐞𝐞𝐬 𝐚𝐧𝐝 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰 𝐭𝐨 𝐔𝐏𝐈.\n\n' +
-        '⬇️ 𝐁𝐞𝐟𝐨𝐫𝐞 𝐭𝐡𝐚𝐭, 𝐣𝐨𝐢𝐧 𝐭𝐡𝐞 𝐜𝐡𝐚𝐧𝐧𝐞𝐥 𝐛𝐞𝐥𝐨𝐰:'
-    );
-    await bot.sendMessage(chatId, welcomeText, { reply_markup: { inline_keyboard: inlineKeyboard } });
-
-    userData.wait_for_ans = 'no';
-    userData.withdraw_step = 'none';
-    updateUserData(chatId, userData);
-});
-
-// ==================== CALLBACK: /joined ====================
-bot.on('callback_query', async (callbackQuery) => {
-    const chatId = callbackQuery.from.id;
-    const messageId = callbackQuery.message.message_id;
-    const data = callbackQuery.data;
-
-    if (data === '/joined') {
-        const allJoined = await checkUserJoinedChannels(chatId, bot);
-        if (allJoined) {
-            await bot.deleteMessage(chatId, messageId);
-            await sendNormalKeyboard(chatId, bot);
-            await bot.sendMessage(chatId, boldSerif('💁‍♂ 𝐖𝐞𝐥𝐜𝐨𝐦𝐞! 𝐑𝐞𝐟𝐞𝐫 & 𝐄𝐚𝐫𝐧 𝐑𝐮𝐩𝐞𝐞𝐬.'));
-
-            const userData = getUserData(chatId);
-            const pendingReferrer = userData.pending_referrer;
-            if (!userData.referral_credited && pendingReferrer && pendingReferrer !== chatId) {
-                const referrerData = getUserData(pendingReferrer);
-                if (referrerData) {
-                    referrerData.balance += CONFIG.PER_REFERRAL_BONUS;
-                    updateUserData(pendingReferrer, referrerData);
-                    userData.referral_credited = true;
-                    userData.pending_referrer = 0;
-                    updateUserData(chatId, userData);
-                    const firstName = callbackQuery.from.first_name;
-                    await bot.sendMessage(pendingReferrer, `➤ New Referral: ${firstName}\n₹${CONFIG.PER_REFERRAL_BONUS} added to your balance`);
+            if (referrerIdStr && referrerIdStr !== chatId.toString()) {
+                const referrerId = parseInt(referrerIdStr);
+                const referrerExists = await usersCollection.findOne({ _id: referrerId.toString() });
+                if (referrerExists) {
+                    await updateUserData(chatId, { pending_referrer: referrerId });
+                    console.log(`Pending referrer set for ${chatId}: ${referrerId}`);
+                } else {
+                    console.log(`Referrer ${referrerId} not found`);
                 }
             }
         } else {
-            await bot.answerCallbackQuery(callbackQuery.id, { text: 'You haven\'t joined all required channels. Please join and try again.', show_alert: true });
+            await bot.sendMessage(chatId, boldSerif('👋 𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐛𝐚𝐜𝐤!'));
         }
-    }
-    // Reset pending withdrawal state if any
-    const userData = getUserData(chatId);
-    if (userData.wait_for_ans === 'yes') {
-        userData.wait_for_ans = 'no';
-        updateUserData(chatId, userData);
-    }
-});
 
-// ==================== TEXT MESSAGE HANDLER ====================
-bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-    if (!text) return;
-
-    // Admin commands
-    if (chatId === CONFIG.ADMIN_ID && text.startsWith('/approve_withdraw')) {
-        const parts = text.split(' ');
-        if (parts.length >= 2) {
-            const userId = parseInt(parts[1]);
-            await approveWithdrawal(userId, bot);
-        } else {
-            await bot.sendMessage(CONFIG.ADMIN_ID, 'Usage: /approve_withdraw <user_id>');
+        // Inline keyboard for channel joining
+        const inlineKeyboard = [];
+        for (const ch of CONFIG.CHANNELS) {
+            inlineKeyboard.push([{ text: `↗️ Join ${ch}`, url: `https://t.me/${ch.substring(1)}` }]);
         }
-        return;
-    }
-    if (chatId === CONFIG.ADMIN_ID && text.startsWith('/reject_withdraw')) {
-        const parts = text.split(' ');
-        if (parts.length >= 2) {
-            const userId = parseInt(parts[1]);
-            await rejectWithdrawal(userId, bot);
-        } else {
-            await bot.sendMessage(CONFIG.ADMIN_ID, 'Usage: /reject_withdraw <user_id>');
+        inlineKeyboard.push([{ text: '✅ Joined', callback_data: '/joined' }]);
+
+        const welcomeText = boldSerif(
+            '𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐭𝐨 𝐨𝐮𝐫 𝐛𝐨𝐭!\n\n' +
+            '👨‍💻 𝐑𝐞𝐟𝐞𝐫 & 𝐞𝐚𝐫𝐧 𝐫𝐮𝐩𝐞𝐞𝐬 𝐚𝐧𝐝 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰 𝐭𝐨 𝐔𝐏𝐈.\n\n' +
+            '⬇️ 𝐁𝐞𝐟𝐨𝐫𝐞 𝐭𝐡𝐚𝐭, 𝐣𝐨𝐢𝐧 𝐭𝐡𝐞 𝐜𝐡𝐚𝐧𝐧𝐞𝐥 𝐛𝐞𝐥𝐨𝐰:'
+        );
+        await bot.sendMessage(chatId, welcomeText, { reply_markup: { inline_keyboard: inlineKeyboard } });
+
+        await updateUserData(chatId, { wait_for_ans: 'no', withdraw_step: 'none' });
+    });
+
+    // ---------------------- callback: /joined ----------------------
+    bot.on('callback_query', async (callbackQuery) => {
+        const chatId = callbackQuery.from.id;
+        const messageId = callbackQuery.message.message_id;
+        const data = callbackQuery.data;
+        console.log(`Callback from ${chatId}: ${data}`);
+
+        if (data === '/joined') {
+            const allJoined = await checkUserJoinedChannels(chatId, bot);
+            if (allJoined) {
+                await bot.deleteMessage(chatId, messageId);
+                await sendNormalKeyboard(chatId, bot);
+                await bot.sendMessage(chatId, boldSerif('💁‍♂ 𝐖𝐞𝐥𝐜𝐨𝐦𝐞! 𝐑𝐞𝐟𝐞𝐫 & 𝐄𝐚𝐫𝐧 𝐑𝐮𝐩𝐞𝐞𝐬.'));
+
+                const userData = await getUserData(chatId);
+                const pendingReferrer = userData.pending_referrer;
+                if (!userData.referral_credited && pendingReferrer && pendingReferrer !== chatId) {
+                    const referrerData = await getUserData(pendingReferrer);
+                    if (referrerData) {
+                        const newBalance = (referrerData.balance || 0) + CONFIG.PER_REFERRAL_BONUS;
+                        await updateUserData(pendingReferrer, { balance: newBalance });
+                        await updateUserData(chatId, { referral_credited: true, pending_referrer: 0 });
+                        const firstName = callbackQuery.from.first_name;
+                        await bot.sendMessage(pendingReferrer, `➤ New Referral: ${firstName}\n₹${CONFIG.PER_REFERRAL_BONUS} added to your balance`);
+                        console.log(`Referral credited: ${pendingReferrer} got ₹${CONFIG.PER_REFERRAL_BONUS} from ${chatId}`);
+                    }
+                }
+            } else {
+                await bot.answerCallbackQuery(callbackQuery.id, { text: 'Join all channels first!', show_alert: true });
+            }
         }
-        return;
-    }
+        const userData = await getUserData(chatId);
+        if (userData.wait_for_ans === 'yes') {
+            await updateUserData(chatId, { wait_for_ans: 'no' });
+        }
+    });
 
-    // Ignore if user hasn't started
-    if (!db[chatId.toString()]) return;
+    // ---------------------- text message handler ----------------------
+    bot.on('message', async (msg) => {
+        const chatId = msg.chat.id;
+        const text = msg.text;
+        if (!text) return;
+        console.log(`Message from ${chatId}: ${text}`);
 
-    const userData = getUserData(chatId);
-    const withdrawStep = userData.withdraw_step;
-
-    // Withdrawal amount input
-    if (withdrawStep === 'awaiting_amount') {
-        const amount = parseFloat(text);
-        if (isNaN(amount)) {
-            await bot.sendMessage(chatId, '‼️ Please enter a valid number.');
+        // Admin commands
+        if (chatId === CONFIG.ADMIN_ID && (text.startsWith('/approve_withdraw') || text.startsWith('/reject_withdraw'))) {
+            if (text.startsWith('/approve_withdraw')) {
+                const parts = text.split(' ');
+                if (parts.length >= 2) {
+                    const userId = parseInt(parts[1]);
+                    await approveWithdrawal(userId, bot);
+                } else {
+                    await bot.sendMessage(CONFIG.ADMIN_ID, 'Usage: /approve_withdraw <user_id>');
+                }
+            } else if (text.startsWith('/reject_withdraw')) {
+                const parts = text.split(' ');
+                if (parts.length >= 2) {
+                    const userId = parseInt(parts[1]);
+                    await rejectWithdrawal(userId, bot);
+                } else {
+                    await bot.sendMessage(CONFIG.ADMIN_ID, 'Usage: /reject_withdraw <user_id>');
+                }
+            }
             return;
         }
-        if (amount < CONFIG.MIN_WITHDRAW_LIMIT) {
-            await bot.sendMessage(chatId, `⚠️ Minimum withdrawal amount is ₹${CONFIG.MIN_WITHDRAW_LIMIT}.`);
-            return;
-        }
-        if (amount > userData.balance) {
-            await bot.sendMessage(chatId, `⚠️ You don't have enough balance. Your balance is ₹${userData.balance}.`);
-            return;
-        }
-        userData.pending_withdraw_amount = amount;
-        userData.withdraw_step = 'awaiting_upi';
-        updateUserData(chatId, userData);
-        await bot.sendMessage(chatId, '🆙 Now send your UPI address:');
-        return;
-    }
 
-    // UPI input
-    if (withdrawStep === 'awaiting_upi') {
-        const upi = text;
-        if (!/^[\w.-]+@[\w.-]+$/.test(upi)) {
-            await bot.sendMessage(chatId, '‼️ Invalid UPI address. Please enter a valid UPI (e.g., name@bank).');
-            return;
-        }
-        const amount = userData.pending_withdraw_amount;
-        if (amount > userData.balance) {
-            await bot.sendMessage(chatId, '⚠️ Your balance changed. Please start withdrawal again.');
-            userData.withdraw_step = 'none';
-            userData.pending_withdraw_amount = 0;
-            updateUserData(chatId, userData);
-            await sendNormalKeyboard(chatId, bot);
-            return;
-        }
-        userData.balance -= amount;
-        userData.pending_withdraw_upi = upi;
-        userData.withdraw_step = 'none';
-        updateUserData(chatId, userData);
-        const adminMsg = `💸 *Withdrawal Request*\nUser ID: \`${chatId}\`\nAmount: ₹${amount}\nUPI: \`${upi}\`\n\nUse /approve_withdraw ${chatId} to approve\nUse /reject_withdraw ${chatId} to reject`;
-        await bot.sendMessage(CONFIG.ADMIN_ID, adminMsg, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `⏳ Your withdrawal request of ₹${amount} has been sent to admin. Please wait for approval.`);
-        await sendNormalKeyboard(chatId, bot);
-        return;
-    }
+        const userData = await getUserData(chatId);
+        if (!userData) return;
 
-    // Main menu buttons
-    switch (text) {
-        case '💰 Balance':
-            await bot.sendMessage(chatId, boldSerif(`💵 𝐘𝐨𝐮𝐫 𝐁𝐚𝐥𝐚𝐧𝐜𝐞 𝐢𝐬: ₹${userData.balance}`));
-            break;
-        case '🔗 Referral':
-            const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${chatId}`;
-            const referralText = boldSerif('🔗 𝐘𝐨𝐮𝐫 𝐫𝐞𝐟𝐞𝐫𝐫𝐚𝐥 𝐥𝐢𝐧𝐤:\n') +
-                link + '\n\n' +
-                boldSerif(`🔰 𝐎𝐧 𝐞𝐚𝐜𝐡 𝐫𝐞𝐟𝐞𝐫𝐫𝐚𝐥 𝐲𝐨𝐮 𝐰𝐢𝐥𝐥 𝐫𝐞𝐜𝐞𝐢𝐯𝐞 ₹${CONFIG.PER_REFERRAL_BONUS}`);
-            await bot.sendMessage(chatId, referralText);
-            break;
-        case '💸 Withdraw':
-            if (userData.balance < CONFIG.MIN_WITHDRAW_LIMIT) {
-                await bot.sendMessage(chatId, boldSerif(`⚠️ 𝐌𝐢𝐧𝐢𝐦𝐮𝐦 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐚𝐦𝐨𝐮𝐧𝐭 𝐢𝐬 ₹${CONFIG.MIN_WITHDRAW_LIMIT}.`));
+        const withdrawStep = userData.withdraw_step;
+
+        // Withdrawal amount input
+        if (withdrawStep === 'awaiting_amount') {
+            const amount = parseFloat(text);
+            if (isNaN(amount)) {
+                await bot.sendMessage(chatId, '‼️ Please enter a valid number.');
                 return;
             }
-            userData.withdraw_step = 'awaiting_amount';
-            userData.pending_withdraw_amount = 0;
-            updateUserData(chatId, userData);
-            await bot.sendMessage(chatId, `💰 Enter the amount you want to withdraw (min ₹${CONFIG.MIN_WITHDRAW_LIMIT}):`);
-            break;
-        default:
+            if (amount < CONFIG.MIN_WITHDRAW_LIMIT) {
+                await bot.sendMessage(chatId, `⚠️ Minimum withdrawal amount is ₹${CONFIG.MIN_WITHDRAW_LIMIT}.`);
+                return;
+            }
+            if (amount > userData.balance) {
+                await bot.sendMessage(chatId, `⚠️ You don't have enough balance. Your balance is ₹${userData.balance}.`);
+                return;
+            }
+            await updateUserData(chatId, {
+                pending_withdraw_amount: amount,
+                withdraw_step: 'awaiting_upi'
+            });
+            await bot.sendMessage(chatId, '🆙 Now send your UPI address:');
+            return;
+        }
+
+        // UPI input
+        if (withdrawStep === 'awaiting_upi') {
+            const upi = text;
+            if (!/^[\w.-]+@[\w.-]+$/.test(upi)) {
+                await bot.sendMessage(chatId, '‼️ Invalid UPI address. Please enter a valid UPI (e.g., name@bank).');
+                return;
+            }
+            const amount = userData.pending_withdraw_amount;
+            if (amount > userData.balance) {
+                await bot.sendMessage(chatId, '⚠️ Your balance changed. Please start withdrawal again.');
+                await updateUserData(chatId, { withdraw_step: 'none', pending_withdraw_amount: 0 });
+                await sendNormalKeyboard(chatId, bot);
+                return;
+            }
+            const newBalance = userData.balance - amount;
+            await updateUserData(chatId, {
+                balance: newBalance,
+                pending_withdraw_upi: upi,
+                withdraw_step: 'none'
+            });
+            const adminMsg = `💸 *Withdrawal Request*\nUser ID: \`${chatId}\`\nAmount: ₹${amount}\nUPI: \`${upi}\`\n\nUse /approve_withdraw ${chatId} to approve\nUse /reject_withdraw ${chatId} to reject`;
+            await bot.sendMessage(CONFIG.ADMIN_ID, adminMsg, { parse_mode: 'Markdown' });
+            await bot.sendMessage(chatId, `⏳ Your withdrawal request of ₹${amount} has been sent to admin. Please wait for approval.`);
             await sendNormalKeyboard(chatId, bot);
-    }
-});
+            return;
+        }
+
+        // Main menu buttons
+        switch (text) {
+            case '💰 Balance':
+                await bot.sendMessage(chatId, boldSerif(`💵 𝐘𝐨𝐮𝐫 𝐁𝐚𝐥𝐚𝐧𝐜𝐞 𝐢𝐬: ₹${userData.balance}`));
+                break;
+            case '🔗 Referral':
+                const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${chatId}`;
+                const referralText = boldSerif('🔗 𝐘𝐨𝐮𝐫 𝐫𝐞𝐟𝐞𝐫𝐫𝐚𝐥 𝐥𝐢𝐧𝐤:\n') +
+                    link + '\n\n' +
+                    boldSerif(`🔰 𝐎𝐧 𝐞𝐚𝐜𝐡 𝐫𝐞𝐟𝐞𝐫𝐫𝐚𝐥 𝐲𝐨𝐮 𝐰𝐢𝐥𝐥 𝐫𝐞𝐜𝐞𝐢𝐯𝐞 ₹${CONFIG.PER_REFERRAL_BONUS}`);
+                await bot.sendMessage(chatId, referralText);
+                break;
+            case '💸 Withdraw':
+                if (userData.balance < CONFIG.MIN_WITHDRAW_LIMIT) {
+                    await bot.sendMessage(chatId, boldSerif(`⚠️ 𝐌𝐢𝐧𝐢𝐦𝐮𝐦 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐚𝐦𝐨𝐮𝐧𝐭 𝐢𝐬 ₹${CONFIG.MIN_WITHDRAW_LIMIT}.`));
+                    return;
+                }
+                await updateUserData(chatId, { withdraw_step: 'awaiting_amount', pending_withdraw_amount: 0 });
+                await bot.sendMessage(chatId, `💰 Enter the amount you want to withdraw (min ₹${CONFIG.MIN_WITHDRAW_LIMIT}):`);
+                break;
+            default:
+                await sendNormalKeyboard(chatId, bot);
+        }
+    });
+}
+
+startBot().catch(console.error);
