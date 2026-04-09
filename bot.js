@@ -4,12 +4,12 @@ const http = require('http');
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-    BOT_TOKEN: '8373867092:AAGdhIUllnFiW6D18WFm5cIoT-B91HFdAes',
+    BOT_TOKEN: '8373867092:AAFJJjbghOBqtSxPrrufCZPiUELhIMH2cEM',
     ADMIN_ID: 8597801059,
     BOT_USERNAME: 'refertoearn_inr_bot',
     CHANNELS: ['@brutetest'],
     CHANNELS_ON_CHECK: ['@brutetest'],
-    WELCOME_BONUS: 1,
+    WELCOME_BONUS: 60000,
     PER_REFERRAL_BONUS: 2,
     MIN_WITHDRAW_LIMIT: 20
 };
