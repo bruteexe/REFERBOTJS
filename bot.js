@@ -12,12 +12,11 @@ const CONFIG = {
     WELCOME_BONUS: 1,                            // coins
     PER_REFERRAL_BONUS: 2,                       // coins
     MIN_WITHDRAW_LIMIT: 20,                      // coins
-    ADSTERRA_SMARTLINK: 'https://www.profitablecpmratenetwork.com/zwmmdjhez3?key=ea7aba8747e101822cb0916975cec08a'
 };
 
 // Check required environment variables
 if (!CONFIG.BOT_TOKEN || !CONFIG.ADMIN_ID || !CONFIG.BOT_USERNAME) {
-    console.error('Missing required environment variables: BOT_TOKEN, ADMIN_ID, BOT_USERNAME');
+    console.error('Missing required env: BOT_TOKEN, ADMIN_ID, BOT_USERNAME');
     process.exit(1);
 }
 
@@ -101,7 +100,7 @@ async function sendNormalKeyboard(chatId, bot) {
     const keyboard = {
         keyboard: [
             ['💰 Balance', '🔗 Referral'],
-            ['💸 Withdraw', '🎮 Watch Ad']
+            ['💸 Withdraw']
         ],
         resize_keyboard: true
     };
@@ -118,7 +117,7 @@ async function approveWithdrawal(userId, bot) {
             return;
         }
         await updateUserData(userId, { pending_withdraw_amount: 0, pending_withdraw_upi: '' });
-        await bot.sendMessage(userId, boldSerif(`✅ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐨𝐟 ${pending} 𝐜𝐨𝐢𝐧𝐬 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐚𝐩𝐩𝐫𝐨𝐯𝐞𝐝 𝐚𝐧𝐝 𝐰𝐢𝐥𝐥 𝐛𝐞 𝐩𝐫𝐨𝐜𝐞𝐬𝐬𝐞𝐝.`));
+        await bot.sendMessage(userId, boldSerif(`✅ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐨𝐟 ${pending} 𝐜𝐨𝐢𝐧𝐬 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐚𝐩𝐩𝐫𝐨𝐯𝐞𝐝.`));
         await bot.sendMessage(CONFIG.ADMIN_ID, `Withdrawal approved for user ${userId} (${pending} coins).`);
         console.log(`Approved withdrawal for ${userId}: ${pending} coins`);
     } catch (err) {
@@ -141,7 +140,7 @@ async function rejectWithdrawal(userId, bot) {
             pending_withdraw_amount: 0,
             pending_withdraw_upi: ''
         });
-        await bot.sendMessage(userId, boldSerif(`❌ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐫𝐞𝐪𝐮𝐞𝐬𝐭 𝐨𝐟 ${pending} 𝐜𝐨𝐢𝐧𝐬 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐫𝐞𝐣𝐞𝐜𝐭𝐞𝐝. 𝐀𝐦𝐨𝐮𝐧𝐭 𝐫𝐞𝐟𝐮𝐧𝐝𝐞𝐝.`));
+        await bot.sendMessage(userId, boldSerif(`❌ 𝐘𝐨𝐮𝐫 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰𝐚𝐥 𝐨𝐟 ${pending} 𝐜𝐨𝐢𝐧𝐬 𝐡𝐚𝐬 𝐛𝐞𝐞𝐧 𝐫𝐞𝐣𝐞𝐜𝐭𝐞𝐝. 𝐀𝐦𝐨𝐮𝐧𝐭 𝐫𝐞𝐟𝐮𝐧𝐝𝐞𝐝.`));
         await bot.sendMessage(CONFIG.ADMIN_ID, `Withdrawal rejected for user ${userId} (${pending} coins refunded).`);
         console.log(`Rejected withdrawal for ${userId}: ${pending} coins`);
     } catch (err) {
@@ -150,45 +149,70 @@ async function rejectWithdrawal(userId, bot) {
     }
 }
 
-// ==================== EXPRESS WEBHOOK SERVER (for Taddy) ====================
+// ==================== EXPRESS WEBHOOK SERVER ====================
 const app = express();
 app.use(express.json());
 
-const TADDY_WEBHOOK_SECRET = process.env.TADDY_WEBHOOK_SECRET || 'default-secret-change-me';
+// ---------- ADSGRAM REWARD WEBHOOK (GET) ----------
+app.get('/api/adsgram-reward', async (req, res) => {
+    const { userId } = req.query;
+    const rewardAmount = 1; // coins per ad
 
-// Taddy webhook endpoint – credits coins when ad is fully watched
-app.post('/webhook/taddy', async (req, res) => {
-    console.log('Taddy webhook received:', req.body);
+    if (!userId) {
+        console.error('❌ AdsGram reward missing userId');
+        return res.status(400).send('Missing userId');
+    }
+
+    try {
+        const userData = await getUserData(userId);
+        userData.balance += rewardAmount;
+        await updateUserData(userId, userData);
+        console.log(`✅ AdsGram rewarded user ${userId}: +${rewardAmount} coin(s). New balance: ${userData.balance}`);
+        res.status(200).send('OK');
+    } catch (err) {
+        console.error('Error processing AdsGram reward:', err);
+        res.status(500).send('Internal Server Error');
+    }
+});
+
+// ---------- TADDY WEBHOOK (POST) ----------
+const TADDY_WEBHOOK_SECRET = process.env.TADDY_WEBHOOK_SECRET;
+if (!TADDY_WEBHOOK_SECRET) {
+    console.warn('⚠️ TADDY_WEBHOOK_SECRET not set – Taddy webhooks will be rejected');
+}
+
+app.post('/api/taddy-webhook', async (req, res) => {
     const signature = req.headers['x-taddy-webhook-secret'];
-    if (signature !== TADDY_WEBHOOK_SECRET) {
-        console.error('Invalid Taddy webhook signature');
+    if (!signature || signature !== TADDY_WEBHOOK_SECRET) {
+        console.error('❌ Invalid Taddy webhook signature');
         return res.status(401).send('Invalid signature');
     }
 
-    const { event, userId, payload } = req.body;
+    const { userId, event } = req.body;
+    const rewardAmount = 1;
+
     if (event === 'ad_view_through' && userId) {
         try {
             const userData = await getUserData(userId);
-            const rewardCoins = 1; // 1 coin per ad – you can adjust
-            userData.balance += rewardCoins;
+            userData.balance += rewardAmount;
             await updateUserData(userId, userData);
-            console.log(`User ${userId} earned ${rewardCoins} coin(s) for watching ad. New balance: ${userData.balance}`);
+            console.log(`✅ Taddy rewarded user ${userId}: +${rewardAmount} coin(s). New balance: ${userData.balance}`);
             res.status(200).send('OK');
         } catch (err) {
-            console.error('Failed to credit user:', err);
-            res.status(500).send('Internal error');
+            console.error('Error processing Taddy reward:', err);
+            res.status(500).send('Internal Server Error');
         }
     } else {
+        // Acknowledge other events
         res.status(200).send('OK');
     }
 });
 
-// Health check endpoint for Render
+// Health check
 app.get('/', (req, res) => {
     res.send('Bot is running');
 });
 
-// Start Express server (for webhook and health check)
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
     console.log(`Webhook server listening on port ${PORT}`);
@@ -217,8 +241,6 @@ bot.onText(/\/start(?:\s+ref_(.+))?/, async (msg, match) => {
             if (referrerExists) {
                 await updateUserData(chatId, { pending_referrer: referrerId });
                 console.log(`Pending referrer set for ${chatId}: ${referrerId}`);
-            } else {
-                console.log(`Referrer ${referrerId} not found`);
             }
         }
     } else {
@@ -234,7 +256,7 @@ bot.onText(/\/start(?:\s+ref_(.+))?/, async (msg, match) => {
 
     const welcomeText = boldSerif(
         '𝐖𝐞𝐥𝐜𝐨𝐦𝐞 𝐭𝐨 𝐨𝐮𝐫 𝐛𝐨𝐭!\n\n' +
-        '👨‍💻 𝐑𝐞𝐟𝐞𝐫 & 𝐞𝐚𝐫𝐧 𝐜𝐨𝐢𝐧𝐬, 𝐰𝐚𝐭𝐜𝐡 𝐚𝐝𝐬, 𝐚𝐧𝐝 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰 𝐭𝐨 𝐔𝐏𝐈.\n\n' +
+        '👨‍💻 𝐑𝐞𝐟𝐞𝐫 & 𝐞𝐚𝐫𝐧 𝐜𝐨𝐢𝐧𝐬, 𝐰𝐚𝐭𝐜𝐡 𝐚𝐝𝐬, 𝐚𝐧𝐝 𝐰𝐢𝐭𝐡𝐝𝐫𝐚𝐰.\n\n' +
         '⬇️ 𝐁𝐞𝐟𝐨𝐫𝐞 𝐭𝐡𝐚𝐭, 𝐣𝐨𝐢𝐧 𝐭𝐡𝐞 𝐜𝐡𝐚𝐧𝐧𝐞𝐥 𝐛𝐞𝐥𝐨𝐰:'
     );
     await bot.sendMessage(chatId, welcomeText, { reply_markup: { inline_keyboard: inlineKeyboard } });
@@ -282,7 +304,7 @@ bot.on('message', async (msg) => {
     if (!text) return;
     console.log(`Message from ${chatId}: ${text}`);
 
-    // Admin commands (withdrawal approval)
+    // Admin commands
     if (chatId === CONFIG.ADMIN_ID && (text.startsWith('/approve_withdraw') || text.startsWith('/reject_withdraw'))) {
         const parts = text.split(' ');
         if (parts.length < 2) {
@@ -298,13 +320,13 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Ignore if user hasn't started (no user doc)
+    // Ignore if user hasn't started
     const userData = await getUserData(chatId);
     if (!userData) return;
 
     const withdrawStep = userData.withdraw_step;
 
-    // Withdrawal amount input (in coins)
+    // Withdrawal amount input
     if (withdrawStep === 'awaiting_amount') {
         const amount = parseInt(text);
         if (isNaN(amount)) {
@@ -354,7 +376,7 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Main menu buttons
+    // Main menu buttons (no ad button here – ads are in mini‑app only)
     switch (text) {
         case '💰 Balance':
             await bot.sendMessage(chatId, boldSerif(`💵 𝐘𝐨𝐮𝐫 𝐁𝐚𝐥𝐚𝐧𝐜𝐞: ${userData.balance} 𝐜𝐨𝐢𝐧𝐬`));
@@ -374,18 +396,12 @@ bot.on('message', async (msg) => {
             await updateUserData(chatId, { withdraw_step: 'awaiting_amount', pending_withdraw_amount: 0 });
             await bot.sendMessage(chatId, `💰 Enter the number of coins you want to withdraw (min ${CONFIG.MIN_WITHDRAW_LIMIT}):`);
             break;
-        case '🎮 Watch Ad':
-            // Send Adsterra Smartlink – user can click and watch ads (popunder)
-            await bot.sendMessage(chatId, boldSerif('📺 𝐂𝐥𝐢𝐜𝐤 𝐭𝐡𝐞 𝐥𝐢𝐧𝐤 𝐛𝐞𝐥𝐨𝐰 𝐭𝐨 𝐰𝐚𝐭𝐜𝐡 𝐚𝐧 𝐚𝐝 𝐚𝐧𝐝 𝐞𝐚𝐫𝐧 𝐜𝐨𝐢𝐧𝐬:\n') + CONFIG.ADSTERRA_SMARTLINK);
-            // Note: The actual coin reward will come via Taddy webhook when you implement the mini‑app.
-            // For now, the user just gets the link. You can also integrate Taddy SDK in a mini‑app.
-            break;
         default:
             await sendNormalKeyboard(chatId, bot);
     }
 });
 
-// Start database connection and bot
+// ==================== START BOT ====================
 connectToDatabase().then(() => {
     console.log('Bot is ready and listening for messages');
 }).catch(err => {
