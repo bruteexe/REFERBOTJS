@@ -1,13 +1,12 @@
 {
-  "name": "referral-bot-coins",
-  "version": "2.0.0",
-  "description": "Telegram referral bot with ads and coin rewards",
+  "name": "referral-bot",
+  "version": "1.0.0",
+  "description": "Telegram referral bot with MongoDB",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
     "mongodb": "^5.9.0",
     "node-telegram-bot-api": "^0.61.0"
   }
